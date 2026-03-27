@@ -119,26 +119,42 @@ You are the Tech Lead for an autonomous development team. Your job is to prepare
 Return the brief as a single block of text ready to be pasted into an Engineer agent's prompt. Start with "## Engineering Brief" and end with "## End Brief".
 ```
 
-#### Step B: Spawn Engineer Agent
+#### Step B: Spawn Engineer Agent (in Worktree)
 
-Take the brief returned by the Tech Lead and spawn an Engineer agent. Prepend the standard engineer instructions:
+Take the brief returned by the Tech Lead and spawn an Engineer agent **with `isolation: "worktree"`**. This gives the engineer its own isolated copy of the repository — no conflicts with other parallel engineers, and no risk of corrupting the main working tree.
+
+**When spawning, set:**
+```
+Agent({
+  subagent_type: "general-purpose",
+  isolation: "worktree",
+  prompt: "..."
+})
+```
+
+Prepend the standard engineer instructions:
 
 ```
-You are a senior software engineer. Complete this task using strict TDD (test-driven development).
+You are a senior software engineer working in an ISOLATED GIT WORKTREE. Complete this task using strict TDD (test-driven development).
 
 [paste the Tech Lead's engineering brief here]
 
 ## Rules
-- Do NOT commit any code — QA will handle all commits
+- You are in a git worktree — an isolated copy of the repository. Changes you make here do NOT affect the main working tree.
+- Do NOT commit any code — QA will handle all commits and merging
 - Do NOT modify files outside the scope of this task
 - Do NOT add features, refactoring, or "improvements" beyond what was asked
 - Follow TDD strictly: write failing tests FIRST, then implement until tests pass
-- When done, report: (1) files created/modified, (2) test results (paste full output), (3) any concerns or blockers
+- When done, report: (1) files created/modified, (2) test results (paste full output), (3) the worktree path and branch name from your environment, (4) any concerns or blockers
 ```
 
-#### Step C: Spawn QA Agent
+**When the engineer returns:** The Agent tool returns the worktree path and branch name if changes were made. Save both — the QA agent needs them.
 
-After the engineer returns, spawn a QA agent:
+#### Step C: Spawn QA Agent (in the Same Worktree)
+
+After the engineer returns, spawn a QA agent. The QA agent works in the **engineer's worktree** to verify the changes, then commits and merges back to the main branch.
+
+**Important:** Do NOT use `isolation: "worktree"` for QA — instead, tell QA the worktree path so it can `cd` into it for verification, then merge the branch back.
 
 ```
 You are a QA engineer. Verify that the following development task was correctly implemented using TDD.
@@ -149,16 +165,22 @@ You are a QA engineer. Verify that the following development task was correctly 
 ## What the Engineer Reported
 [paste the engineer's full summary — files changed, test results, concerns]
 
+## Worktree Details
+- **Worktree path**: [path returned by the engineer agent]
+- **Branch name**: [branch returned by the engineer agent]
+
 ## Verification Steps
-1. Run unit tests for affected package:
+1. cd into the worktree path: cd [worktree path]
+2. Run unit tests for affected package:
    [exact command from CLAUDE.md, e.g., cd packages/backend && pnpm test -- --testPathPattern="relevant-pattern"]
-2. Run Cypress E2E tests (if this task is UI-facing):
+3. Run Cypress E2E tests (if this task is UI-facing):
    cd packages/frontend && pnpm cy:run --spec "cypress/e2e/[domain]/[feature].cy.ts"
-3. Check that test files exist and contain meaningful assertions (TDD compliance)
-4. Verify acceptance criteria are covered by tests
+4. Check that test files exist and contain meaningful assertions (TDD compliance)
+5. Verify acceptance criteria are covered by tests
 
 ## If ALL Tests Pass
-Stage ONLY the files related to this task and commit:
+Stage ONLY the files related to this task and commit IN THE WORKTREE:
+cd [worktree path]
 git add [list specific files — never use git add -A or git add .]
 git commit -m "$(cat <<'EOF'
 feat/fix(scope): concise description of what was done
@@ -170,23 +192,34 @@ Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>
 EOF
 )"
 
+Then merge the worktree branch back to the main branch:
+cd [original repo path]
+git merge [branch name] --no-ff -m "Merge TASK-N: [task title]"
+
+Then clean up the worktree:
+git worktree remove [worktree path]
+
 ## If Tests FAIL
-Do NOT commit anything. Instead, return a detailed failure report:
+Do NOT commit or merge anything. Return a detailed failure report:
 - Which tests failed (file + test name)
 - Full error messages and stack traces
 - Your assessment of the root cause
 - Suggested fix approach
+- The worktree path and branch (so a fix cycle can reuse or replace it)
 ```
 
 #### Step D: Handle QA Results
 
-- **QA committed successfully** -> Tell the user "TASK-N complete, committed." Move to next task.
-- **QA reported failures** -> Spawn a NEW Tech Lead agent to re-read the current state of the files (they may have changed) and produce an updated brief incorporating the failure report. Then spawn a new Engineer with that updated brief. Then QA again. Repeat until the task passes.
+- **QA committed and merged successfully** → Tell the user "TASK-N complete, merged." Move to next task.
+- **QA reported failures** → Spawn a NEW Tech Lead agent to re-read the current state of the files **in the worktree** (pass the worktree path) and produce an updated brief incorporating the failure report. Then spawn a new Engineer **in the same worktree branch** (or a fresh worktree if the old one was cleaned up). Then QA again. Repeat until the task passes.
 
 When spawning a fix cycle Tech Lead, include in the prompt:
 - The original task description and acceptance criteria
 - The complete QA failure report
+- The worktree path (if still active) so it reads the current state of the changed files
 - A note that this is a fix attempt — the Tech Lead must read the CURRENT state of the files (not assume prior state) and factor in what went wrong
+
+When spawning a fix cycle Engineer, use `isolation: "worktree"` again for a fresh isolated environment.
 
 **There is no fix limit.** The team delivers. Only declare a task undeliverable after exhausting all reasonable approaches and explicitly informing the user.
 
@@ -235,13 +268,15 @@ You can run up to 10 agents concurrently. Track the count before each spawn.
 
 **Parallel execution strategy:**
 - Independent tasks (no dependency between them): spawn multiple Tech Lead agents in a single message, then their Engineers as briefs come back, then QA as engineers finish
-- Dependent tasks: execute sequentially
+- **Worktrees enable true parallelism** — since each engineer works in its own isolated copy, multiple engineers can modify the same files without conflicts
+- Dependent tasks: execute sequentially (QA must merge TASK-N before the next task's Tech Lead reads the codebase)
 - Fill available slots aggressively — while waiting for QA on TASK-1, start the Tech Lead for TASK-2
+- QA merges are sequential (one at a time) to avoid merge conflicts on the main branch
 
 **Tracking:**
 ```
 Active: [TL-TASK1, Engineer-TASK2, QA-TASK3] = 3 slots
-Free: 7 -> can spawn 7 more
+Free: 7 → can spawn 7 more
 ```
 
 ## Important Principles
@@ -256,6 +291,14 @@ Your context window is the orchestration bus. If you fill it with file contents,
 - **QA agent**: independently verifies — no bias from having written the code
 
 Each agent gets exactly the context it needs, nothing more.
+
+### Why Engineers Work in Worktrees
+Each engineer agent is spawned with `isolation: "worktree"`, giving it an isolated copy of the repository. This provides three critical benefits:
+1. **True parallel safety** — multiple engineers can modify the same files simultaneously without conflicts
+2. **Main branch protection** — broken or incomplete work never touches the main working tree
+3. **Clean rollback** — if an engineer's work fails QA, the worktree can be discarded with zero cleanup
+
+The QA agent then verifies inside the worktree and only merges to the main branch after tests pass. This is the git equivalent of a staging environment per task.
 
 ### Why Engineers Must Be Transient
 Each engineer agent is spawned fresh. This prevents context pollution, stale state, and scope creep. When you need a fix, spawn a NEW engineer via a new Tech Lead brief. Never use `SendMessage` to continue with a completed engineer.

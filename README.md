@@ -56,14 +56,15 @@ User Requirement
   For each task (respecting dependencies):
        |
        v
-  +---------+     +-----------+     +------+
-  |Tech Lead| --> | Engineer  | --> |  QA  |
-  +---------+     +-----------+     +------+
-  Reads files,     TDD: tests       Runs tests,
-  writes brief     first, then      verifies AC,
-                   implement        commits if pass
+  +---------+     +--worktree--+     +------+
+  |Tech Lead| --> | Engineer   | --> |  QA  |
+  +---------+     | (isolated) |     +------+
+  Reads files,    +------------+     Verifies in
+  writes brief     TDD: tests        worktree,
+                   first, then        commits,
+                   implement          merges to main
        |
-       | (if QA fails: new Tech Lead -> new Engineer -> QA again)
+       | (if QA fails: new Tech Lead -> new Engineer worktree -> QA again)
        v
   +---------+
   |  Final  |  Phase 3: Run full test suite, verify all requirements met
@@ -100,22 +101,24 @@ For each task, three agents are spawned sequentially:
 - Specifies exact TDD workflow, file paths, and test commands
 - Documents what NOT to do (scope boundaries)
 
-**Step B — Engineer** implements using strict TDD:
+**Step B — Engineer** implements in an **isolated git worktree** (`isolation: "worktree"`):
+- Gets a fresh, isolated copy of the repository — no conflicts with other parallel engineers
 - Writes failing tests FIRST
 - Implements until all tests pass
-- Reports files changed, test output, and any concerns
+- Reports files changed, test output, worktree path/branch, and any concerns
 - Does NOT commit — that's QA's job
 
-**Step C — QA** independently verifies:
+**Step C — QA** independently verifies **in the engineer's worktree**:
+- `cd`s into the worktree to run tests in the engineer's isolated environment
 - Runs the full test suite for affected packages
 - Checks TDD compliance (test files exist with meaningful assertions)
 - Verifies every acceptance criterion is covered
-- **Commits only if everything passes** (atomic, scoped commits)
-- If tests fail: returns a detailed failure report with root cause analysis
+- **If tests pass:** commits in the worktree, merges the branch back to main (`--no-ff`), and cleans up the worktree
+- **If tests fail:** returns a detailed failure report with root cause analysis (worktree preserved for fix cycle)
 
 ### Fix Cycles
 
-If QA reports failures, the dispatcher spawns a **new** Tech Lead to re-read the current state of files (they may have changed), produce an updated brief incorporating the failure report, and then a new Engineer implements the fix. This cycle repeats until the task passes.
+If QA reports failures, the dispatcher spawns a **new** Tech Lead to re-read the current state of files in the worktree, produce an updated brief incorporating the failure report, and then a new Engineer implements the fix in a fresh worktree. This cycle repeats until the task passes.
 
 **There is no fix limit.** The team delivers.
 
@@ -138,6 +141,17 @@ This is a deliberate **quality gate**. Code only enters the repository after ind
 ### TDD Is Non-Negotiable
 
 Every task follows test-first development. If an engineer returns work without tests, the dispatcher flags it and spawns a new engineer to write the missing tests. This ensures coverage from the start, not as an afterthought.
+
+### Engineers Work in Git Worktrees
+
+Each engineer agent is spawned with `isolation: "worktree"`, giving it a completely isolated copy of the repository. This is the git equivalent of a per-task staging environment:
+
+1. **True parallel safety** — multiple engineers can modify the same files simultaneously without conflicts, because each works in its own worktree
+2. **Main branch protection** — broken or incomplete work never touches the main working tree; it only merges after QA passes
+3. **Clean rollback** — if an engineer's work fails QA, the worktree can be discarded with zero cleanup on the main branch
+4. **Sequential merges** — QA merges one worktree at a time to avoid merge conflicts on main
+
+The QA agent verifies inside the worktree, commits there, then merges the worktree branch back to main with `--no-ff` (preserving merge history) before cleaning up.
 
 ### Engineers Are Transient
 
@@ -165,9 +179,10 @@ Free: 7 -> can spawn 7 more
 
 **Parallel strategy:**
 - Independent tasks: spawn multiple Tech Leads simultaneously
-- As briefs come back, spawn Engineers immediately
+- As briefs come back, spawn Engineers immediately — **each in its own worktree**, so they can't conflict
 - As Engineers finish, spawn QA immediately
-- Dependent tasks: execute sequentially
+- Dependent tasks: execute sequentially (QA must merge TASK-N before the next task's Tech Lead reads the codebase)
+- QA merges are sequential (one at a time) to avoid merge conflicts on main
 - Fill available slots aggressively — start the next task while waiting for QA on the current one
 
 ---
@@ -356,10 +371,12 @@ dev-team-skill/
 |--------|-------------------|----------------|
 | Context management | Single context window for everything | Separate context per role |
 | Code quality gate | User reviews before commit | Independent QA agent verifies before commit |
-| Test discipline | Tests when asked | TDD enforced on every task |
+| Test discipline | Tests when asked | TDD enforced on every task + hooks block untested code |
 | Task decomposition | Ad hoc | Structured backlog with dependencies |
 | Parallelism | Sequential by default | Up to 10 concurrent agents |
+| Isolation | Works in main working tree | Each engineer in its own git worktree |
 | Scope control | Can drift | Engineers scoped to single tasks, spawned fresh |
+| Main branch safety | Changes land directly | Changes only merge after QA passes in worktree |
 
 ---
 
