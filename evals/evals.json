@@ -1,0 +1,23 @@
+{
+  "skill_name": "dev-team",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "The AgentPreviewPanel crashes when an agent has no description. I checked and agent.description can be undefined but the component doesn't handle that. Can the dev team fix this? It should show a placeholder like 'No description provided' instead of crashing.",
+      "expected_output": "The team should: (1) PM creates a simple 1-task backlog, (2) Engineer writes a test for the undefined description case first, then fixes the component, (3) QA runs tests and commits. The fix should handle undefined/null/empty description gracefully.",
+      "files": []
+    },
+    {
+      "id": 2,
+      "prompt": "I need a 'created at' timestamp shown on each AI agent card in the AgentList component. It should display as a relative time like '2 hours ago' or '3 days ago'. The createdAt field already exists in the agent data from the backend.",
+      "expected_output": "The team should: (1) PM creates backlog with tasks for frontend display + possible date utility, (2) Engineers implement with TDD - tests for the date formatting + component rendering, (3) QA verifies with unit tests and possibly Cypress, (4) PM reviews final result. Should include a relative time formatter and update the AgentList component.",
+      "files": []
+    },
+    {
+      "id": 3,
+      "prompt": "Build a confirmation dialog that appears when users try to delete a pipe. Right now clicking delete just removes it immediately with no warning. The dialog should say 'Are you sure you want to delete this pipe? This action cannot be undone.' with Cancel and Delete buttons. Delete button should be red.",
+      "expected_output": "The team should: (1) PM breaks this into tasks - confirmation dialog component + integration with delete flow, (2) Engineers build the dialog component with TDD, then integrate it, (3) QA writes Cypress E2E test for the delete confirmation flow, (4) Multiple commits - one per task. Should follow existing UI patterns in the codebase.",
+      "files": []
+    }
+  ]
+}
