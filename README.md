@@ -172,15 +172,132 @@ Free: 7 -> can spawn 7 more
 
 ---
 
+## TDD Enforcement Hooks
+
+The skill includes **Claude Code hooks** that enforce TDD at the tool level — not just as a convention in the skill prompt, but as hard guardrails that prevent Claude from writing source code without tests or committing without test files staged.
+
+These hooks live in `hooks/settings.json` and should be copied into your project's `.claude/settings.json`.
+
+### Hook 1: Pre-Write/Edit — Test File Must Exist First
+
+**Matcher:** `Write|Edit` (fires before any file creation or modification)
+
+**What it does:**
+1. Reads the file path Claude is about to write/edit
+2. Checks if it's a source file inside `packages/backend/src/` or `packages/frontend/src/`
+3. Skips if the file is itself a test (`.spec.ts`, `.spec.tsx`, `.cy.ts`) or a type declaration (`.d.ts`)
+4. For any `.ts` or `.tsx` source file, checks whether a corresponding `.spec.ts` or `.spec.tsx` exists in the same directory
+5. If no test file exists, **injects a TDD policy warning** into Claude's context telling it to create the test file first
+
+**This means:** Claude literally cannot write implementation code for a source file that has no test file. It is forced to create the test first — true test-driven development enforced at the infrastructure level.
+
+```
+Trigger:  Write packages/backend/src/users/users.service.ts
+Check:    Does packages/backend/src/users/users.service.spec.ts exist?
+No:       "TDD POLICY: No test file found for users.service.ts.
+           Write tests FIRST. Create the test file before implementing."
+Yes:      Proceed normally
+```
+
+### Hook 2: Pre-Commit — Tests Must Be Staged
+
+**Matcher:** `Bash` (fires before any bash command, filters for `git commit`)
+
+**What it does:**
+1. Detects if the bash command contains `git commit`
+2. Inspects `git diff --cached --name-only` for staged files
+3. Checks if any staged source files (`.ts`/`.tsx` in `packages/*/src/`, excluding test files) exist
+4. Checks if any test files (`.spec.ts`, `.spec.tsx`, `.cy.ts`) are also staged
+5. If source files are staged but **no test files** are staged, **blocks the commit entirely**
+
+**This means:** No commit can enter the repository with source changes unless test changes are included. This catches the case where an engineer writes tests and source code, but only stages the source — the hook blocks it.
+
+```
+Staged:   packages/backend/src/users/users.service.ts     (source)
+          packages/backend/src/users/users.controller.ts   (source)
+Missing:  No .spec.ts or .cy.ts files staged
+Result:   BLOCKED — "Stage test files before committing."
+```
+
+### How the Hooks Complement the Skill
+
+The dev-team skill enforces TDD through **prompt instructions** — telling each Engineer agent to write tests first and having QA verify test existence. But prompts can be ignored or misinterpreted. The hooks add a **mechanical enforcement layer**:
+
+| Layer | Mechanism | Catches |
+|-------|-----------|---------|
+| **Skill prompt** | "Write failing tests FIRST" instruction to Engineer agents | Normal flow — engineers follow TDD by instruction |
+| **Hook 1** (Write/Edit) | Blocks source file creation if no test file exists | Engineers who skip ahead to implementation |
+| **Hook 2** (Commit) | Blocks commits without test files staged | QA agents who try to commit incomplete work |
+
+Together, these three layers make it nearly impossible for untested code to enter the repository.
+
+### Installing the Hooks
+
+Copy the hooks into your project's Claude Code settings:
+
+```bash
+# If .claude/settings.json doesn't exist yet
+mkdir -p .claude
+cp hooks/settings.json .claude/settings.json
+
+# If .claude/settings.json already exists, merge the hooks manually
+# or use jq to combine:
+jq -s '.[0] * .[1]' .claude/settings.json hooks/settings.json > /tmp/merged.json \
+  && mv /tmp/merged.json .claude/settings.json
+```
+
+### Customizing the Hooks
+
+The hooks are configured for a **monorepo with `packages/backend/` and `packages/frontend/`** directories. To adapt them to your project structure:
+
+1. **Change the source path pattern** — edit the `case` statement in Hook 1:
+   ```bash
+   # Default: */packages/backend/src/* | */packages/frontend/src/*
+   # Single app: */src/*
+   # Different structure: */apps/api/src/* | */apps/web/src/*
+   ```
+
+2. **Change the staged file pattern** — edit the `grep -E` in Hook 2:
+   ```bash
+   # Default: ^packages/(backend|frontend)/src/
+   # Single app: ^src/
+   # Different structure: ^apps/(api|web)/src/
+   ```
+
+3. **Add more test file extensions** — both hooks recognize `.spec.ts`, `.spec.tsx`, and `.cy.ts`. Add more patterns (e.g., `.test.ts`, `.e2e.ts`) by extending the `case`/`grep` patterns.
+
+---
+
 ## Installation
 
-### As a Claude Code Skill
+### 1. Install the Skill
 
 Copy the `SKILL.md` file to your Claude Code skills directory:
 
 ```bash
 mkdir -p ~/.claude/skills/dev-team
 cp SKILL.md ~/.claude/skills/dev-team/SKILL.md
+```
+
+### 2. Install the TDD Hooks
+
+Copy or merge the hooks into your project:
+
+```bash
+# New project (no existing settings)
+mkdir -p .claude
+cp hooks/settings.json .claude/settings.json
+
+# Existing project (merge hooks)
+jq -s '.[0] * .[1]' .claude/settings.json hooks/settings.json > /tmp/merged.json \
+  && mv /tmp/merged.json .claude/settings.json
+```
+
+### 3. (Optional) Install Evals
+
+```bash
+mkdir -p ~/.claude/skills/dev-team/evals
+cp evals/evals.json ~/.claude/skills/dev-team/evals/evals.json
 ```
 
 ### Trigger Phrases
@@ -216,6 +333,8 @@ Run evals to verify the skill produces correct team behavior and task decomposit
 dev-team-skill/
   SKILL.md            # The skill definition (install this)
   README.md           # This file
+  hooks/
+    settings.json     # TDD enforcement hooks for .claude/settings.json
   evals/
     evals.json        # Evaluation test cases
   LICENSE             # MIT License
