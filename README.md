@@ -116,11 +116,27 @@ For each task, three agents are spawned sequentially:
 - **If tests pass:** commits in the worktree, merges the branch back to main (`--no-ff`), and cleans up the worktree
 - **If tests fail:** returns a detailed failure report with root cause analysis (worktree preserved for fix cycle)
 
-### Fix Cycles
+### Escalation Ladder — Fully Autonomous Delivery
 
-If QA reports failures, the dispatcher spawns a **new** Tech Lead to re-read the current state of files in the worktree, produce an updated brief incorporating the failure report, and then a new Engineer implements the fix in a fresh worktree. This cycle repeats until the task passes.
+The team must deliver without blocking on human input. When QA fails:
 
-**There is no fix limit.** The team delivers.
+**Level 1: Sonnet Retries (attempts 1-3)** — New TL reads the QA failure report + current codebase state, produces updated brief, new Engineer in fresh worktree, QA again.
+
+**Level 2: Senior Consultant (after every 3 failures)** — An opus-level Senior Engineer Consultant reads ALL failure reports, the codebase, and the original brief. Produces a corrective diagnosis with exact guidance. The next TL+Engineer cycle must follow this guidance.
+
+**Level 3: Repeat** — The pattern cycles: every 3 sonnet failures trigger a new consultant round with access to all prior failures and prior consultant guidance.
+
+**Emergency Valve** — After 3 consultant rounds (~12 attempts), the task is marked SKIPPED and remaining tasks continue. The user gets maximum delivered work, not a stalled pipeline.
+
+```
+Attempts 1-3:   sonnet TL -> sonnet Eng -> sonnet QA
+                | (3 fails)
+Consultant R1:  opus diagnosis -> corrective guidance
+Attempts 4-6:   sonnet TL (with R1 guidance) -> sonnet Eng -> sonnet QA
+                | (3 more fails)
+Consultant R2:  opus (reads R1 + all failures) -> refined guidance
+                ... and so on until delivery or skip
+```
 
 ### Phase 3 — Final Review
 
@@ -166,6 +182,22 @@ When a fix is needed, a completely new engineer is spawned — never a continuat
 
 The dispatcher's context window is the orchestration bus. Filling it with file contents would destroy its ability to track task state across many concurrent agents. Code analysis belongs in the agents' context windows, not the orchestrator's.
 
+### File-Based Inter-Agent Communication
+
+Agents communicate through **files on disk** in the `.dev-team/` directory, not through the orchestrator. Each agent writes its full output to a file and returns only a 1-line status. The orchestrator passes file paths between agents — never pastes contents. This is what enables long-running sessions without context exhaustion.
+
+### Model Assignments
+
+Not all roles need the same capability level:
+- **PM + Senior Consultant** use `opus` — deep reasoning for requirement decomposition and stuck-task diagnosis
+- **TL + Engineer + QA + Final Review** use `sonnet` — fast, focused execution
+
+This is enforced by the Agent Guard hook — wrong model assignments are hard-blocked.
+
+### Progress Persistence
+
+`dev-team-progress.md` tracks all task state, commit SHAs, and an append-only event log. If the session is interrupted (context limit, timeout, user break), the orchestrator reads this file on resume and picks up exactly where it left off — no re-planning, no duplicate work.
+
 ---
 
 ## Concurrency
@@ -187,99 +219,128 @@ Free: 7 -> can spawn 7 more
 
 ---
 
-## TDD Enforcement Hooks
+## Enforcement Hooks
 
-The skill includes **Claude Code hooks** that enforce TDD at the tool level — not just as a convention in the skill prompt, but as hard guardrails that prevent Claude from writing source code without tests or committing without test files staged.
+The skill includes **8 Claude Code hooks** that mechanically enforce the dev-team protocol — not just as conventions in the skill prompt, but as infrastructure-level guardrails. The hooks are **dormant by default** and only activate when `.dev-team/` directory or `dev-team-progress.md` exists (i.e., when the dev-team skill is running).
 
-These hooks live in `hooks/settings.json` and should be copied into your project's `.claude/settings.json`.
+### Hook Architecture
 
-### Hook 1: Pre-Write/Edit — Test File Must Exist First
+A key design challenge: hooks fire for ALL Claude processes — both the orchestrator and its subagents (PM, TL, Engineer, QA). The **Agent tool is only used by the orchestrator**, so Agent hooks can safely hard-block. For Read/Write/Grep/Glob/Bash, subagents also use them, so those hooks use **conditional soft warnings** with "if you are a team member agent, IGNORE this" phrasing.
 
-**Matcher:** `Write|Edit` (fires before any file creation or modification)
+| # | Hook | Trigger | Type | Enforces |
+|---|------|---------|------|----------|
+| 1 | Agent Guard | `PreToolUse:Agent` | HARD BLOCK | Model assignments, worktree isolation, sequencing |
+| 2 | Dispatcher Read Guard | `PreToolUse:Read` | Soft warn | Orchestrator must not read source files |
+| 3 | Dispatcher Search Guard | `PreToolUse:Grep\|Glob` | Soft warn | Orchestrator must not search codebase |
+| 4 | Dispatcher Write Guard | `PreToolUse:Write\|Edit` | Soft warn | Orchestrator must not write code |
+| 5 | Commit Guard | `PreToolUse:Bash` | Soft warn | Only QA agents commit/merge |
+| 6 | Output Protocol Guard | `PostToolUse:Agent` | Soft warn | Agents return 1-line status + progress reminders |
+| 7 | TDD Source Guard | `PreToolUse:Write\|Edit` | Soft warn | Test file must exist before source file |
+| 8 | TDD Commit Guard | `PreToolUse:Bash` | HARD BLOCK | Commits must include test files |
 
-**What it does:**
-1. Reads the file path Claude is about to write/edit
-2. Checks if it's a source file inside `packages/backend/src/` or `packages/frontend/src/`
-3. Skips if the file is itself a test (`.spec.ts`, `.spec.tsx`, `.cy.ts`) or a type declaration (`.d.ts`)
-4. For any `.ts` or `.tsx` source file, checks whether a corresponding `.spec.ts` or `.spec.tsx` exists in the same directory
-5. If no test file exists, **injects a TDD policy warning** into Claude's context telling it to create the test file first
+### Hook 1: Agent Guard (HARD BLOCK)
 
-**This means:** Claude literally cannot write implementation code for a source file that has no test file. It is forced to create the test first — true test-driven development enforced at the infrastructure level.
+The most critical hook. Performs 4 checks before any agent is spawned:
 
-```
-Trigger:  Write packages/backend/src/users/users.service.ts
-Check:    Does packages/backend/src/users/users.service.spec.ts exist?
-No:       "TDD POLICY: No test file found for users.service.ts.
-           Write tests FIRST. Create the test file before implementing."
-Yes:      Proceed normally
-```
+**Model Assignment** — Detects role from prompt keywords and enforces:
+- PM, Senior Consultant → `model: "opus"` (deep reasoning)
+- TL, Engineer, QA, Final Review → `model: "sonnet"` (fast execution)
+- Blocks if model is missing or wrong
 
-### Hook 2: Pre-Commit — Tests Must Be Staged
+**Worktree Isolation** — Engineer agents MUST have `isolation: "worktree"`. Blocks if missing.
 
-**Matcher:** `Bash` (fires before any bash command, filters for `git commit`)
+**Backlog Sequencing** — TL/Engineer/QA/Final Review blocked if `.dev-team/backlog.md` doesn't exist (PM must complete first).
 
-**What it does:**
-1. Detects if the bash command contains `git commit`
-2. Inspects `git diff --cached --name-only` for staged files
-3. Checks if any staged source files (`.ts`/`.tsx` in `packages/*/src/`, excluding test files) exist
-4. Checks if any test files (`.spec.ts`, `.spec.tsx`, `.cy.ts`) are also staged
-5. If source files are staged but **no test files** are staged, **blocks the commit entirely**
+**Brief Sequencing** — Engineer/QA blocked if `.dev-team/brief-TASK-N.md` doesn't exist for their task (TL must complete first).
 
-**This means:** No commit can enter the repository with source changes unless test changes are included. This catches the case where an engineer writes tests and source code, but only stages the source — the hook blocks it.
+### Hooks 2-4: Dispatcher Purity Guards (Soft Warnings)
 
-```
-Staged:   packages/backend/src/users/users.service.ts     (source)
-          packages/backend/src/users/users.controller.ts   (source)
-Missing:  No .spec.ts or .cy.ts files staged
-Result:   BLOCKED — "Stage test files before committing."
-```
+These protect the orchestrator's context window — its most precious resource:
 
-### How the Hooks Complement the Skill
+- **Read Guard**: Warns when reading source files (allows `dev-team-progress.md`, `.dev-team/*`, `CLAUDE.md`, `.claude/*`)
+- **Search Guard**: Warns when using Grep/Glob for codebase exploration
+- **Write Guard**: Warns when using Write/Edit on source files (allows `.dev-team/*`, `.gitignore`)
 
-The dev-team skill enforces TDD through **prompt instructions** — telling each Engineer agent to write tests first and having QA verify test existence. But prompts can be ignored or misinterpreted. The hooks add a **mechanical enforcement layer**:
+Each warning includes conditional language: team member agents (PM, TL, Engineer, QA) are explicitly told to ignore the message.
 
-| Layer | Mechanism | Catches |
-|-------|-----------|---------|
-| **Skill prompt** | "Write failing tests FIRST" instruction to Engineer agents | Normal flow — engineers follow TDD by instruction |
-| **Hook 1** (Write/Edit) | Blocks source file creation if no test file exists | Engineers who skip ahead to implementation |
-| **Hook 2** (Commit) | Blocks commits without test files staged | QA agents who try to commit incomplete work |
+### Hook 5: Commit Guard (Soft Warning)
 
-Together, these three layers make it nearly impossible for untested code to enter the repository.
+Warns when `git commit` or `git merge` is detected in a Bash command. The orchestrator must never commit — only QA agents do. QA agents are told to ignore the warning.
+
+### Hook 6: Output Protocol Guard (Soft Warning)
+
+Fires after each Agent tool returns. Checks three things:
+
+1. **Output length** — Flags responses >500 chars. Agents should return a 1-line status (e.g., `OK 5 tasks`, `PASS merged abc1234`, `FAIL see .dev-team/qa-TASK-1.md`) and write full output to disk.
+2. **Progress reminder** — After OK/PASS/FAIL responses, reminds to update `dev-team-progress.md`.
+3. **Progress creation** — After PM returns (detected by `OK N tasks` pattern), warns if `dev-team-progress.md` doesn't exist yet.
+
+### Hooks 7-8: TDD Enforcement (Existing)
+
+**Hook 7: Test File Must Exist First** (`Write|Edit`)
+- Checks if a `.ts`/`.tsx` source file in `packages/*/src/` has a corresponding `.spec.ts`/`.spec.tsx`
+- Injects TDD policy warning if no test file exists
+
+**Hook 8: Tests Must Be Staged** (`Bash` — HARD BLOCK)
+- Detects `git commit` commands
+- Blocks if source files are staged without any test files (`.spec.ts`/`.spec.tsx`/`.cy.ts`)
+
+### How All Layers Work Together
+
+| Layer | Mechanism | What It Catches |
+|-------|-----------|----------------|
+| **Skill prompt** | Instructions in agent prompts | Normal flow — agents follow protocol by design |
+| **Agent Guard** | Hard blocks on Agent tool | Wrong model, missing worktree, broken sequencing |
+| **Dispatcher Guards** | Soft warnings on Read/Write/Grep/Glob | Orchestrator polluting its context window |
+| **Output Protocol** | Post-tool warning on Agent | Agents dumping full output instead of file paths |
+| **Commit Guard** | Soft warning on Bash | Orchestrator attempting git commit/merge |
+| **TDD Hooks** | Hard block on Write/Edit + Bash | Untested code entering the repository |
 
 ### Installing the Hooks
 
-Copy the hooks into your project's Claude Code settings:
+**Option A: User-level installation** (recommended — works across all projects):
 
 ```bash
-# If .claude/settings.json doesn't exist yet
+# Install the skill + hooks
+mkdir -p ~/.claude/skills/dev-team/hooks
+cp SKILL.md ~/.claude/skills/dev-team/SKILL.md
+cp hooks/*.sh ~/.claude/skills/dev-team/hooks/
+chmod +x ~/.claude/skills/dev-team/hooks/*.sh
+
+# Merge hook config into your user settings
+# (manually merge hooks/settings.json into ~/.claude/settings.json)
+```
+
+**Option B: Project-level installation** (per-project):
+
+```bash
+# Copy hooks config to project settings
 mkdir -p .claude
 cp hooks/settings.json .claude/settings.json
 
-# If .claude/settings.json already exists, merge the hooks manually
-# or use jq to combine:
+# If .claude/settings.json already exists, merge manually or:
 jq -s '.[0] * .[1]' .claude/settings.json hooks/settings.json > /tmp/merged.json \
   && mv /tmp/merged.json .claude/settings.json
 ```
 
-### Customizing the Hooks
+### Customizing TDD Hooks
 
-The hooks are configured for a **monorepo with `packages/backend/` and `packages/frontend/`** directories. To adapt them to your project structure:
+The TDD hooks (7 & 8) are configured for a **monorepo with `packages/backend/` and `packages/frontend/`**. To adapt:
 
-1. **Change the source path pattern** — edit the `case` statement in Hook 1:
+1. **Source path pattern** — edit the `case` statement in Hook 7:
    ```bash
    # Default: */packages/backend/src/* | */packages/frontend/src/*
    # Single app: */src/*
-   # Different structure: */apps/api/src/* | */apps/web/src/*
+   # Custom: */apps/api/src/* | */apps/web/src/*
    ```
 
-2. **Change the staged file pattern** — edit the `grep -E` in Hook 2:
+2. **Staged file pattern** — edit the `grep -E` in Hook 8:
    ```bash
    # Default: ^packages/(backend|frontend)/src/
    # Single app: ^src/
-   # Different structure: ^apps/(api|web)/src/
    ```
 
-3. **Add more test file extensions** — both hooks recognize `.spec.ts`, `.spec.tsx`, and `.cy.ts`. Add more patterns (e.g., `.test.ts`, `.e2e.ts`) by extending the `case`/`grep` patterns.
+3. **Test extensions** — add `.test.ts`, `.e2e.ts`, etc. by extending the `case`/`grep` patterns.
 
 ---
 
@@ -346,13 +407,19 @@ Run evals to verify the skill produces correct team behavior and task decomposit
 
 ```
 dev-team-skill/
-  SKILL.md            # The skill definition (install this)
-  README.md           # This file
+  SKILL.md                           # The skill definition (install to ~/.claude/skills/dev-team/)
+  README.md                          # This file
   hooks/
-    settings.json     # TDD enforcement hooks for .claude/settings.json
+    settings.json                    # Full hook config for .claude/settings.json
+    agent-guard.sh                   # Model assignment + worktree + sequencing (HARD BLOCK)
+    dispatcher-read-guard.sh         # Orchestrator source read prevention
+    dispatcher-search-guard.sh       # Orchestrator codebase search prevention
+    dispatcher-write-guard.sh        # Orchestrator code write prevention
+    commit-guard.sh                  # QA-only commit/merge enforcement
+    output-protocol-guard.sh         # Agent output protocol + progress reminders
   evals/
-    evals.json        # Evaluation test cases
-  LICENSE             # MIT License
+    evals.json                       # Evaluation test cases
+  LICENSE                            # MIT License
 ```
 
 ---

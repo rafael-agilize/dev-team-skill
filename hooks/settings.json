@@ -2,8 +2,47 @@
   "hooks": {
     "PreToolUse": [
       {
+        "matcher": "Agent",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash $HOME/.claude/skills/dev-team/hooks/agent-guard.sh",
+            "timeout": 10,
+            "statusMessage": "Dev-team: checking agent policy..."
+          }
+        ]
+      },
+      {
+        "matcher": "Read",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash $HOME/.claude/skills/dev-team/hooks/dispatcher-read-guard.sh",
+            "timeout": 5,
+            "statusMessage": "Dev-team: dispatcher guard..."
+          }
+        ]
+      },
+      {
+        "matcher": "Grep|Glob",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash $HOME/.claude/skills/dev-team/hooks/dispatcher-search-guard.sh",
+            "timeout": 5,
+            "statusMessage": "Dev-team: dispatcher guard..."
+          }
+        ]
+      },
+      {
         "matcher": "Write|Edit",
         "hooks": [
+          {
+            "type": "command",
+            "command": "bash $HOME/.claude/skills/dev-team/hooks/dispatcher-write-guard.sh",
+            "timeout": 5,
+            "statusMessage": "Dev-team: dispatcher guard..."
+          },
           {
             "type": "command",
             "command": "jq -r '.tool_input.file_path // .tool_input.file_path' | { read -r f; case \"$f\" in */packages/backend/src/*|*/packages/frontend/src/*) ;; *) exit 0;; esac; case \"$f\" in *.spec.ts|*.spec.tsx|*.cy.ts|*.d.ts) exit 0;; esac; case \"$f\" in *.ts|*.tsx) ;; *) exit 0;; esac; dir=$(dirname \"$f\"); base=$(basename \"$f\"); name=\"${base%.*}\"; spec_ts=\"$dir/$name.spec.ts\"; spec_tsx=\"$dir/$name.spec.tsx\"; if [ ! -f \"$spec_ts\" ] && [ ! -f \"$spec_tsx\" ]; then echo \"{\\\"hookSpecificOutput\\\":{\\\"hookEventName\\\":\\\"PreToolUse\\\",\\\"additionalContext\\\":\\\"TDD POLICY: No test file found for $base. Per CLAUDE.md, write tests FIRST (expected: $spec_ts). Create the test file before implementing the feature.\\\"}}\"; fi; }",
@@ -17,9 +56,28 @@
         "hooks": [
           {
             "type": "command",
+            "command": "bash $HOME/.claude/skills/dev-team/hooks/commit-guard.sh",
+            "timeout": 5,
+            "statusMessage": "Dev-team: commit guard..."
+          },
+          {
+            "type": "command",
             "command": "jq -r '.tool_input.command' | { read -r cmd; case \"$cmd\" in *'git commit'*) ;; *) exit 0;; esac; staged=$(git diff --cached --name-only 2>/dev/null); src_changed=$(echo \"$staged\" | grep -E '^packages/(backend|frontend)/src/.*\\.(ts|tsx)$' | grep -v '\\.spec\\.' | grep -v '\\.cy\\.' | head -1); test_changed=$(echo \"$staged\" | grep -E '\\.(spec\\.ts|spec\\.tsx|cy\\.ts)$' | head -1); if [ -n \"$src_changed\" ] && [ -z \"$test_changed\" ]; then echo \"{\\\"decision\\\":\\\"block\\\",\\\"reason\\\":\\\"TDD POLICY: Source files staged but no test files (.spec.ts/.spec.tsx/.cy.ts). Per CLAUDE.md, every change must include updated tests. Stage test files before committing.\\\"}\"; fi; }",
             "timeout": 10,
             "statusMessage": "Checking tests are included in commit..."
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Agent",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash $HOME/.claude/skills/dev-team/hooks/output-protocol-guard.sh",
+            "timeout": 10,
+            "statusMessage": "Dev-team: checking output protocol..."
           }
         ]
       }
