@@ -24,12 +24,14 @@ The orchestrator (Claude Code's main context) acts as a **pure dispatcher** — 
 
 ### The Team
 
-| Role | Responsibility | Context Strategy |
-|------|---------------|-----------------|
-| **Product Manager (PM)** | Explores the codebase, understands the requirement, produces a structured backlog of small testable tasks | Broad exploration — reads CLAUDE.md, scans related files, maps architecture |
-| **Tech Lead (TL)** | Reads all relevant source files for a specific task and produces a complete, self-contained engineering brief | Deep and focused — reads every file the engineer will need, pastes full contents |
-| **Engineer** | Receives the brief, writes failing tests first, then implements until tests pass | Zero prior context — works only from the brief, clean slate every time |
-| **QA** | Runs tests independently, verifies acceptance criteria, commits if passing | Independent verification — no bias from having written the code |
+| Role | Model | Responsibility | Context Strategy |
+|------|-------|---------------|-----------------|
+| **Product Manager (PM)** | `opus` | Explores codebase, understands requirement, produces structured backlog of small testable tasks | Broad exploration — reads CLAUDE.md, scans related files, maps architecture |
+| **Tech Lead (TL)** | `sonnet` | Reads all relevant source files for a specific task and produces a complete, self-contained engineering brief | Deep and focused — reads every file the engineer will need, pastes full contents |
+| **Engineer** | `sonnet` | Receives the brief, writes failing tests first (TDD), then implements until tests pass. Works in isolated git worktree | Zero prior context — works only from the brief, clean slate every time |
+| **QA** | `sonnet` | Runs tests independently, verifies acceptance criteria, commits and merges if passing | Independent verification — no bias from having written the code |
+| **Senior Consultant** | `opus` | Diagnoses root cause when the sonnet team fails 3 times on a task. Produces corrective guidance with exact code snippets | Full picture — reads all failure reports, prior consultant guidance, and current codebase state |
+| **Final Review** | `sonnet` | After all tasks complete, runs full test suite and verifies implementation matches original requirement | End-to-end verification — checks git log, runs tests, reads modified files |
 
 ### Why Separate Agents?
 
@@ -50,29 +52,37 @@ User Requirement
        v
   +---------+
   |   PM    |  Phase 1: Analyze codebase, create structured backlog
+  | (opus)  |  Writes: .dev-team/backlog.md + .dev-team/context.md
   +---------+
        |
        v
-  For each task (respecting dependencies):
+  For each task (respecting dependencies, up to 10 agents parallel):
        |
        v
-  +---------+     +--worktree--+     +------+
-  |Tech Lead| --> | Engineer   | --> |  QA  |
-  +---------+     | (isolated) |     +------+
+  +---------+     +--worktree--+     +--------+
+  |Tech Lead| --> | Engineer   | --> |   QA   |
+  |(sonnet) |     | (sonnet)   |     |(sonnet)|
+  +---------+     | (isolated) |     +--------+
   Reads files,    +------------+     Verifies in
   writes brief     TDD: tests        worktree,
-                   first, then        commits,
+  to .dev-team/    first, then        commits,
                    implement          merges to main
        |
-       | (if QA fails: new Tech Lead -> new Engineer worktree -> QA again)
-       v
-  +---------+
-  |  Final  |  Phase 3: Run full test suite, verify all requirements met
-  | Review  |
-  +---------+
+       | QA FAIL? Escalation ladder:
+       |   Attempts 1-3: new TL -> new Engineer -> QA (sonnet retries)
+       |   After 3 fails: Senior Consultant (opus) diagnoses root cause
+       |   Attempts 4-6: TL with consultant guidance -> Engineer -> QA
+       |   ... repeats every 3 fails. Skip after 3 consultant rounds.
        |
        v
-  Done (or loop back for gaps)
+  +-----------+
+  |  Final    |  Phase 3: git log + full test suite + requirement check
+  |  Review   |
+  | (sonnet)  |
+  +-----------+
+       |
+       v
+  Done → archive progress (or loop back for gaps)
 ```
 
 ### Phase 1 — Product Manager Analysis
